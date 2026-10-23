@@ -1,0 +1,106 @@
+# Core stack: Cassandra + Spark (master, worker) + Grafana.
+# Optional profiles:  --profile streaming  (Zookeeper + Kafka)
+#                     --profile capture    (tcpdump -> nfdump -> Kafka)
+
+x-spark: &spark
+  build:
+    context: .
+    dockerfile: docker/spark/Dockerfile
+  environment:
+    CASSANDRA_HOST: cassandra
+    CASSANDRA_USER: ${CASSANDRA_USER:-}
+    CASSANDRA_PASSWORD: ${CASSANDRA_PASSWORD:-}
+    KAFKA_BROKERS: kafka:9092
+    CAPTURE_INTERFACE: ${CAPTURE_INTERFACE:-eth0}
+    DETECT_BATCH_SIZE: ${DETECT_BATCH_SIZE:-20}
+    ALERT_THRESHOLD: ${ALERT_THRESHOLD:-0.5}
+  volumes:
+    - .:/app
+
+services:
+  cassandra:
+    image: cassandra:4.1
+    container_name: ids-cassandra
+    ports: ["9042:9042"]
+    environment:
+      CASSANDRA_CLUSTER_NAME: netflow-ids
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' >/dev/null 2>&1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  cassandra-init:
+    image: cassandra:4.1
+    container_name: ids-cassandra-init
+    depends_on:
+      cassandra: { condition: service_healthy }
+    volumes:
+      - ./docker/cassandra/init.cql:/init.cql:ro
+    command: ["cqlsh", "cassandra", "-f", "/init.cql"]
+    restart: "no"
+
+  spark-master:
+    <<: *spark
+    container_name: ids-spark-master
+    command: /start-master.sh
+    ports: ["8080:8080", "7077:7077"]
+    depends_on:
+      cassandra-init: { condition: service_completed_successfully }
+
+  spark-worker:
+    <<: *spark
+    container_name: ids-spark-worker
+    command: /start-worker.sh spark://spark-master:7077
+    depends_on: [spark-master]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: ids-grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-me}
+      GF_INSTALL_PLUGINS: hadesarchitect-cassandra-datasource
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on: [cassandra]
+
+  # ---- optional: streaming ingestion ------------------------------------
+  zookeeper:
+    profiles: [streaming]
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    profiles: [streaming]
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on: [zookeeper]
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  capture:
+    profiles: [capture]
+    build:
+      context: .
+      dockerfile: docker/capture/Dockerfile
+    cap_add: [NET_ADMIN, NET_RAW]
+    network_mode: host      # capture the host's interface; Kafka must be reachable at localhost:9092
+    environment:
+      CAPTURE_INTERFACE: ${CAPTURE_INTERFACE:-eth0}
+      KAFKA_BROKERS: localhost:9092
+    volumes:
+      - capture-work:/work
+
+volumes:
+  cassandra-data:
+  grafana-data:
+  capture-work:

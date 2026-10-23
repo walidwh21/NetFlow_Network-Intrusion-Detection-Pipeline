@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: Cassandra
+    uid: cassandra
+    type: hadesarchitect-cassandra-datasource
+    access: proxy
+    isDefault: true
+    jsonData:
+      keyspace: netflow
+      consistency: ONE
+      host: cassandra:9042
+    # If Cassandra authentication is enabled, add:
+    #   user: <name>
+    # secureJsonData:
+    #   password: <password>
